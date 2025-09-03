@@ -17,11 +17,16 @@ subroutine USR1
   logical,          save :: inited = .false.
   integer,          save :: NG_O3 = -1      ! O3 的气相组分下标
 
+  integer,          save :: istep = 0       !<< 计步器（用于控制 flush 频率）
+  integer, parameter :: N_FLUSH = 100        !<< 每 N_FLUSH 步 flush 一次；需要更实时就调小
+
   integer :: p, i, j, k, ijk, ng
   double precision :: xc, yc, dyc, y0c
 
+  !==================== 初始化（只执行一次） ====================
   if (.not. inited) then
-     ! ===== 等距网格：用公式映射每个目标高度到 J 行 =====
+!$omp single
+     ! 等距网格：把目标高度映射到 J 行
      dyc = DY(jstart3)
      y0c = YG_N(jstart3) - 0.5d0*DY(jstart3)
      do p = 1, NPLANES
@@ -30,7 +35,7 @@ subroutine USR1
         if (Jline(p) > jend3  ) Jline(p) = jend3
      end do
 
-     ! ===== 通过别名查找 O3 的下标 =====
+     ! 通过别名查找 O3 的下标（大小写不敏感）
      NG_O3 = -1
      do ng = 1, size(SPECIES_ALIAS_g)
         if (upper(SPECIES_ALIAS_g(ng)) == 'O3') then
@@ -40,23 +45,25 @@ subroutine USR1
      end do
      if (NG_O3 < 0) then
         write(*,*) 'WARNING: O3 alias not found. Set NG_O3 manually!'
-        NG_O3 = 2   ! 按你 mfx 配置兜底为 2
+        NG_O3 = 2
      end if
 
-     ! ===== 打开 5 个输出文件（各写各的）=====
-     do p = 1, NPLANES
-        write(fname(p),'(A,F0.2,A)') 'line_y', PLANES(p), 'm.csv'
-        unitno(p) = 70 + p
-        open(unit=unitno(p), file=fname(p), status='unknown', position='append', recl=100000)
-        write(unitno(p),'(A)') 'time,x,y,rho_g,u_g,v_g,ep_g,ep_s,u_s,v_s,Xg_O3'
-     end do
+     ! 打开 5 个输出文件（各写各的）
+      do p = 1, NPLANES
+         write(fname(p),'(A,F0.2,A)') 'line_y', PLANES(p), 'm.csv'
+         open(newunit=unitno(p), file=fname(p), status='unknown', position='append', &
+              action='write', form='formatted', recl=100000)
+         write(unitno(p),'(A)') 'time,x,y,rho_g,u_g,v_g,ep_g,ep_s,u_s,v_s,Xg_O3'
+      end do
 
      inited = .true.
+!$omp end single
   end if
+  !============================================================
 
   k = kstart3   ! 2D：唯一的 k 层
 
-  ! ===== 对每个 y 平面，写整行（该 J 行上所有 I）=====
+  ! 对每个 y 平面，写整行（该 J 行上所有 I）
   do p = 1, NPLANES
      j = Jline(p)
      do i = istart3, iend3
@@ -66,15 +73,22 @@ subroutine USR1
 
         !$omp critical
         write(unitno(p),'(*(G0.8,:,","))') &
-               TIME, xc, yc, &
-               RO_G(ijk), &
-               U_G(ijk), V_G(ijk), &
-               EP_G(ijk), EP_S(ijk,1), &
-               U_S(ijk,1), V_S(ijk,1), X_G(ijk, NG_O3)
+             TIME, xc, yc, &
+             RO_G(ijk), &
+             U_G(ijk), V_G(ijk), &
+             EP_G(ijk), EP_S(ijk,1), &
+             U_S(ijk,1), V_S(ijk,1), X_G(ijk, NG_O3)
         !$omp end critical
      end do
-     flush(unitno(p))
   end do
+
+  ! 控制 flush 频率：每 N_FLUSH 步刷一次（避免每步刷盘带来的巨大 I/O 开销）
+  istep = istep + 1
+  if (mod(istep, N_FLUSH) == 0) then
+     do p = 1, NPLANES
+        flush(unitno(p))
+     end do
+  end if
 
 contains
   pure function upper(s) result(t)
